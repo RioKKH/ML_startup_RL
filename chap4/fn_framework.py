@@ -40,14 +40,7 @@ class FNAgent:
         agent = cls(epsilon, actions)
 
         checkpoint = torch.load(model_path, map_location="cpu")
-        # モデルのクラスと引数から再構築(実装時に具体的なモデルクラスを指定)
-        # agetn.model = checkpoint["model_class"](**checkpoint["model_args"])
-        # agent.model.load_state_dict(checkpoint["model_state_dict"])
-
-        # 簡易版: モデルは外部で作成してからload_state_dictを呼ぶことを想定
-        agent.model = checkpoint[
-            "model_state_dict"
-        ]  # 実際の使用時は適切なモデルインスタンスに変更
+        agent.model = checkpoint["model_state_dict"]
         agent.initialized = True
         return agent
 
@@ -67,7 +60,6 @@ class FNAgent:
             estimates = self.estimate(s)
             if self.estimate_probs:
                 action = np.random.choice(self.actions, size=1, p=estimates)[0]
-
                 return action
             else:
                 return np.argmax(estimates)
@@ -129,7 +121,9 @@ class Trainer:
             s = env.reset()
             done = False
             step_count = 0
+            episode_reward = 0  # エピソード報酬を追跡
             self.episode_begin(i, agent)
+
             while not done:
                 if render:
                     env.render()
@@ -145,6 +139,8 @@ class Trainer:
 
                 a = agent.policy(s)
                 n_state, reward, done, info = env.step(a)
+                episode_reward += reward  # エピソード報酬を累積
+
                 e = Experience(s, a, reward, n_state, done)
                 self.experiences.append(e)
                 if not self.training and len(self.experiences) == self.buffer_size:
@@ -152,7 +148,11 @@ class Trainer:
                     self.training = True
 
                 self.step(i, step_count, agent, e)
+                s = n_state
+                step_count += 1
             else:
+                # エピソード報酬を直接使用
+                self.reward_log.append(episode_reward)
                 self.episode_end(i, step_count, agent)
 
                 if not self.training and initial_count > 0 and i >= initial_count:
@@ -198,13 +198,25 @@ class Observer:
         return self._env.observation_space
 
     def reset(self):
-        return self.transform(self._env.reset())
+        # Gymnasium API対応
+        result = self._env.reset()
+        if isinstance(result, tuple):
+            state, info = result
+        else:
+            state = result
+        return self.transform(state)
 
     def render(self):
-        self._env.render(mode="human")
+        self._env.render()
 
     def step(self, action):
-        n_state, reward, done, info = self._env.step(action)
+        # Gymnasium API対応
+        result = self._env.step(action)
+        if len(result) == 5:  # 新しいGymnasium
+            n_state, reward, terminated, truncated, info = result
+            done = terminated or truncated
+        else:  # 古いGym
+            n_state, reward, done, info = result
         return self.transform(n_state), reward, done, info
 
     def transform(self, state):
@@ -227,8 +239,6 @@ class Logger:
         self.writer = SummaryWriter(self.log_dir)
 
     def set_model(self, model):
-        # PyTorchではモデルの設定は通常不要
-        # 必要に応じてmodel graphをTensorBoardに追加する
         pass
 
     def path_of(self, file_name):
@@ -272,7 +282,6 @@ class Logger:
         self.writer.flush()
 
     def write_image(self, index, frames):
-        # Deal with a 'frames' as a list of sequential gray scaled image.
         last_frames = [f[:, :, -1] for f in frames]
         if np.min(last_frames[-1]) < 0:
             scale = 127 / np.abs(last_frames[-1]).max()
@@ -283,11 +292,8 @@ class Logger:
 
         tag = f"frames_at_training_{index}"
 
-        # PyTorchのTensorBoardは画像を直接追加できる
         for i, f in enumerate(last_frames):
-            # 正規化して[0, 1]の範囲にする
             normalized_frame = (f * scale + offset) / 255.0
-            # チャネル次元を追加 (H, W) -> (1, H, W)
             frame_tensor = torch.from_numpy(normalized_frame).unsqueeze(0).float()
             self.writer.add_image(f"{tag}/frame_{i}", frame_tensor, index)
 
